@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "emm_stepper"
-version = "1.0.0"
-description = "ZDT X42S 第二代闭环步进电机控制库 (仅支持Emm固件)"
+version = "1.0.1"
+description = "ZDT X42S 第二代闭环步进电机控制库 (目前仅支持Emm固件)"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.7"
@@ -31,10 +31,11 @@ dev = [
     "mypy",
 ]
 
+
 [project.urls]
-Homepage = "https://github.com/yourusername/emm_stepper"
-Repository = "https://github.com/yourusername/emm_stepper"
-Issues = "https://github.com/yourusername/emm_stepper/issues"
+"Homepage" = "https://github.com/xhfb/emm_stepper"
+"Repository" = "https://github.com/xhfb/emm_stepper"
+"Issues" = "https://github.com/xhfb/emm_stepper/issues"
 
 [tool.setuptools.packages.find]
 include = ["emm_stepper*"]
