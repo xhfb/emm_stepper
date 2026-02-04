@@ -32,11 +32,13 @@
 
 ## 安装
 
-### 依赖
+本项目已发布到 PyPI，推荐直接使用 pip 安装，无需下载源码：
 
 ```bash
-pip install pyserial
+pip install emm_stepper
 ```
+
+该命令会自动安装所需的依赖库（如 `pyserial`）。
 
 ### 导入库
 
