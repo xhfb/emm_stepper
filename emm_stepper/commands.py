@@ -100,13 +100,21 @@ class Command(ABC, Generic[T]):
         tries = 0
         while tries < SystemConstants.MAX_RETRIES:
             try:
+                # 等待串口稳定，确保上一个命令的响应已完全接收
+                #sleep(0.002)
+
                 # 清空缓冲区
+                in_waiting = self.serial.in_waiting
+                if in_waiting > 0:
+                    stale_data = self.serial.read(in_waiting)
+                    logger.debug(f"清空残留数据 ({in_waiting} 字节): {stale_data.hex()}")
                 self.serial.reset_input_buffer()
                 self.serial.reset_output_buffer()
 
                 # 发送命令
-                logger.debug(f"发送命令: {self._command.hex()}")
+                logger.debug(f"发送命令 (地址={self.address}): {self._command.hex()}")
                 self.serial.write(self._command)
+                self.serial.flush()
 
                 # 读取响应
                 response = self._read_response()
@@ -127,15 +135,36 @@ class Command(ABC, Generic[T]):
 
     def _read_response(self) -> Optional[bytes]:
         """读取响应."""
-        # 读取地址
-        addr = self.serial.read(1)
-        if not addr:
-            raise CommandError("未收到响应")
-
-        # 验证地址
         expected_addr = 1 if self.address == Address.BROADCAST else self.address
-        if addr[0] != expected_addr:
-            raise CommandError(f"地址不匹配: 期望 {expected_addr}, 收到 {addr[0]}")
+
+        # 读取地址，允许跳过最多 8 个非预期字节（处理异步返回数据干扰）
+        skipped = b''
+        addr = None
+        for _ in range(8):
+            byte = self.serial.read(1)
+            if not byte:
+                if skipped:
+                    logger.debug(f"跳过了非预期字节后超时: 跳过={skipped.hex()}")
+                raise CommandError("未收到响应")
+            if byte[0] == expected_addr:
+                addr = byte
+                break
+            else:
+                skipped += byte
+        
+        if addr is None:
+            logger.debug(
+                f"地址不匹配详情: 发送命令={self._command.hex()}, "
+                f"期望地址=0x{expected_addr:02X}({expected_addr}), "
+                f"跳过的字节={skipped.hex()} ({len(skipped)} 字节)"
+            )
+            raise CommandError(f"地址不匹配: 期望 {expected_addr}, 跳过了 {skipped.hex()}")
+        
+        if skipped:
+            logger.debug(
+                f"跳过了 {len(skipped)} 个非预期字节: {skipped.hex()}, "
+                f"命令={self._command.hex()}"
+            )
 
         # 读取功能码
         code = self.serial.read(1)
@@ -807,15 +836,36 @@ class DynamicLengthCommand(Command[T]):
     
     def _read_response(self) -> Optional[bytes]:
         """读取动态长度响应."""
-        # 读取地址
-        addr = self.serial.read(1)
-        if not addr:
-            raise CommandError("未收到响应")
-
-        # 验证地址
         expected_addr = 1 if self.address == Address.BROADCAST else self.address
-        if addr[0] != expected_addr:
-            raise CommandError(f"地址不匹配: 期望 {expected_addr}, 收到 {addr[0]}")
+
+        # 读取地址，允许跳过最多 8 个非预期字节（处理异步返回数据干扰）
+        skipped = b''
+        addr = None
+        for _ in range(8):
+            byte = self.serial.read(1)
+            if not byte:
+                if skipped:
+                    logger.debug(f"[动态长度] 跳过了非预期字节后超时: 跳过={skipped.hex()}")
+                raise CommandError("未收到响应")
+            if byte[0] == expected_addr:
+                addr = byte
+                break
+            else:
+                skipped += byte
+        
+        if addr is None:
+            logger.debug(
+                f"[动态长度] 地址不匹配详情: 发送命令={self._command.hex()}, "
+                f"期望地址=0x{expected_addr:02X}({expected_addr}), "
+                f"跳过的字节={skipped.hex()} ({len(skipped)} 字节)"
+            )
+            raise CommandError(f"地址不匹配: 期望 {expected_addr}, 跳过了 {skipped.hex()}")
+        
+        if skipped:
+            logger.debug(
+                f"[动态长度] 跳过了 {len(skipped)} 个非预期字节: {skipped.hex()}, "
+                f"命令={self._command.hex()}"
+            )
 
         # 读取功能码
         code = self.serial.read(1)
