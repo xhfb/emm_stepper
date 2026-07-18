@@ -75,19 +75,19 @@ class JogParams:
     
     Args:
         direction: 运动方向 (CW/CCW)
-        speed: 速度 (0-3000 RPM)
+        speed: 速度 (0-6000 RPM)
         acceleration: 加速度档位 (0-255)
         sync_flag: 同步标志
     """
     direction: Direction = Direction.CW
-    speed: int = 100  # 0-3000 RPM
+    speed: int = 100  # 0-6000 RPM
     acceleration: int = 10  # 0-255档位
     sync_flag: SyncFlag = SyncFlag.IMMEDIATE
 
     def __post_init__(self):
-        # 速度范围检查
-        if not 0 <= self.speed <= 3000:
-            raise ValueError("速度必须在 0-3000 RPM 之间")
+        # 速度范围检查 (手册命令表仍写 0BB8/3000，V1.0.5 产品规格与实机为 6000)
+        if not 0 <= self.speed <= 6000:
+            raise ValueError("速度必须在 0-6000 RPM 之间")
         # 加速度范围检查
         if not 0 <= self.acceleration <= 255:
             raise ValueError("加速度必须在 0-255 之间")
@@ -112,22 +112,22 @@ class PositionParams:
     
     Args:
         direction: 运动方向 (CW/CCW)
-        speed: 速度 (0-3000 RPM)
+        speed: 速度 (0-6000 RPM)
         acceleration: 加速度档位 (0-255)
         pulse_count: 脉冲数 (默认16细分下，3200个脉冲=一圈360°)
         motion_mode: 运动模式 (相对/绝对)
         sync_flag: 同步标志
     """
     direction: Direction = Direction.CW
-    speed: int = 100  # 0-3000 RPM
+    speed: int = 100  # 0-6000 RPM
     acceleration: int = 10  # 0-255档位
     pulse_count: int = 3200  # 脉冲数
     motion_mode: MotionMode = MotionMode.RELATIVE_LAST
     sync_flag: SyncFlag = SyncFlag.IMMEDIATE
 
     def __post_init__(self):
-        if not 0 <= self.speed <= 3000:
-            raise ValueError("速度必须在 0-3000 RPM 之间")
+        if not 0 <= self.speed <= 6000:
+            raise ValueError("速度必须在 0-6000 RPM 之间")
         if not 0 <= self.acceleration <= 255:
             raise ValueError("加速度必须在 0-255 之间")
         if not 0 <= self.pulse_count <= 0xFFFFFFFF:
@@ -145,6 +145,42 @@ class PositionParams:
             (self.pulse_count >> 16) & 0xFF,
             (self.pulse_count >> 8) & 0xFF,
             self.pulse_count & 0xFF,
+            self.motion_mode,
+            self.sync_flag,
+        ])
+
+
+@dataclass
+class FastPositionParams:
+    """快速位置模式设参 (Emm, V2.0.0+).
+    
+    对应命令: 5.3.13 快速位置模式控制（Emm）— F1 设参。
+    方向由后续 FC 脉冲的有符号 int32 隐含。
+    
+    Args:
+        speed: 速度 (0-6000 RPM)
+        acceleration: 加速度档位 (0-255)
+        motion_mode: 运动模式 (相对上一目标/绝对/相对当前位置)
+        sync_flag: 同步标志
+    """
+    speed: int = 100
+    acceleration: int = 10
+    motion_mode: MotionMode = MotionMode.RELATIVE_LAST
+    sync_flag: SyncFlag = SyncFlag.IMMEDIATE
+
+    def __post_init__(self):
+        if not 0 <= self.speed <= 6000:
+            raise ValueError("速度必须在 0-6000 RPM 之间")
+        if not 0 <= self.acceleration <= 255:
+            raise ValueError("加速度必须在 0-255 之间")
+
+    @property
+    def bytes(self) -> bytes:
+        """返回 F1 命令体（不含地址/功能码/校验）."""
+        return bytes([
+            (self.speed >> 8) & 0xFF,
+            self.speed & 0xFF,
+            self.acceleration,
             self.motion_mode,
             self.sync_flag,
         ])
@@ -241,6 +277,11 @@ class VersionParams:
         minor = (self.firmware_version % 100) // 10
         patch = self.firmware_version % 10
         return f"V{major}.{minor}.{patch}"
+
+    @property
+    def is_v2(self) -> bool:
+        """是否为 V2.0.0 及以上固件 (firmware_version >= 200)."""
+        return self.firmware_version >= 200
 
     @property
     def hw_series_str(self) -> str:

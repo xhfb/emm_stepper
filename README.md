@@ -1,6 +1,6 @@
 # Emm Stepper - ZDT X42S 第二代闭环步进电机控制库
 
-基于 **ZDT_X42S第二代闭环步进电机用户手册V1.0.3_251224**，仅支持 **Emm固件**,作者测试电机的固件为`ZDT_X42S_V1.0.7_260203`  
+基于 **ZDT_X42S 用户手册 V1.0.3 / V1.0.5**，仅支持 **Emm 固件**。实机验证含 `V1.0.7` 与 `V2.0.0`；V2.0.0+ 支持快速位置模式（F1/FC）。
 
 ## 参考文档
 
@@ -23,8 +23,9 @@
 
 - ✅ 支持串口TTL/RS485通讯
 - ✅ 支持多电机控制（同一串口不同地址）
-- ✅ 速度模式控制（0-3000 RPM）
+- ✅ 速度模式控制（0-6000 RPM）
 - ✅ 位置模式控制（脉冲数/角度/圈数）
+- ✅ 快速位置模式（V2.0.0+：F1 设参 + FC 发脉冲）
 - ✅ 原点回零功能（单圈就近/方向回零、多圈碰撞/限位回零）
 - ✅ 堵转检测与保护
 - ✅ 读取电机状态（位置、速度、电流、温度等）
@@ -207,7 +208,7 @@ motor.disable()
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| speed | int | 100 | 速度 (0-3000 RPM) |
+| speed | int | 100 | 速度 (0-6000 RPM) |
 | direction | Direction | CW | 运动方向 |
 | acceleration | int | 10 | 加速度档位 (0-255) |
 | sync | bool | False | 是否使用同步模式 |
@@ -226,7 +227,7 @@ motor.jog(speed=200, direction=Direction.CCW, acceleration=20)
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | pulse_count | int | 必填 | 脉冲数（正数CW，负数CCW） |
-| speed | int | 100 | 速度 (0-3000 RPM) |
+| speed | int | 100 | 速度 (0-6000 RPM) |
 | direction | Direction | None | 运动方向（None则根据pulse_count正负判断） |
 | acceleration | int | 10 | 加速度档位 (0-255) |
 | motion_mode | MotionMode | RELATIVE_LAST | 运动模式 |
@@ -246,7 +247,7 @@ motor.move_pulses(pulse_count=-1600, speed=200, acceleration=20)
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | degrees | float | 必填 | 角度（正数CW，负数CCW） |
-| speed | int | 100 | 速度 (0-3000 RPM) |
+| speed | int | 100 | 速度 (0-6000 RPM) |
 | acceleration | int | 10 | 加速度档位 (0-255) |
 | motion_mode | MotionMode | RELATIVE_LAST | 运动模式 |
 | microstep | int | 16 | 细分值 |
@@ -267,7 +268,7 @@ motor.move_degrees(degrees=-180, speed=200, acceleration=20)
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | revolutions | float | 必填 | 圈数（正数CW，负数CCW） |
-| speed | int | 100 | 速度 (0-3000 RPM) |
+| speed | int | 100 | 速度 (0-6000 RPM) |
 | acceleration | int | 10 | 加速度档位 (0-255) |
 | motion_mode | MotionMode | RELATIVE_LAST | 运动模式 |
 | microstep | int | 16 | 细分值 |
@@ -281,6 +282,24 @@ motor.move_revolutions(revolutions=2, speed=300, acceleration=30)
 # 反向转动0.5圈
 motor.move_revolutions(revolutions=-0.5, speed=300, acceleration=30)
 ```
+
+#### configure_fast_position / move_fast_pulses（V2.0.0+）
+快速位置模式：先 `F1` 设定速度/加速度/运动模式，再反复 `FC` 只发有符号脉冲（帧更短，适合高频更新位置）。
+
+需固件 `firmware_version >= 200`；否则抛错。可用 `motor.supports_fast_position` 探测。
+
+```python
+if motor.supports_fast_position:
+    motor.enable()
+    motor.configure_fast_position(speed=800, acceleration=100)
+    motor.move_fast_pulses(3200)   # 相对运动 3200 脉冲
+    motor.move_fast_pulses(800)    # 继续相对运动
+    motor.move_fast_pulses(-4000)  # 反向回退
+    motor.wait_for_position()
+    motor.disable()
+```
+
+另有 `move_fast_degrees` / `move_fast_revolutions`（需已 `configure_fast_position`）。
 
 #### stop(sync=False)
 立即停止电机。
@@ -752,7 +771,7 @@ motor.set_motor_direction(direction=Direction.CW, store=True)
 ```
 
 #### set_position_window(window_deg, store) / get_position_window()
-修改/读取位置到达窗口（度）。
+修改/读取位置到达窗口（度）。写入走 `get_config` → 改 `position_window` → `set_config`（独立命令 `D1 07` 在部分 Emm 固件上不可用）。
 
 ```python
 motor.set_position_window(window_deg=0.8, store=True)
@@ -770,7 +789,7 @@ print(motor.get_heartbeat_time())
 #### 其他驱动参数读写（V1.0.3 Emm）
 | 方法 | 说明 |
 |------|------|
-| `set_power_off_flag(flag)` | 修改掉电标志 |
+| `set_power_off_flag(flag)` | 修改掉电标志（V1/V2 默认极性可能不同，见 API 注释） |
 | `get_option_status()` | 选项参数状态（部分固件字段可能不可信） |
 | `set_motor_type(motor_type, store)` | 电机类型 `0x19`/`0x32` |
 | `set_firmware_type(firmware_type, store)` | 固件类型 X/Emm/狂暴 |
@@ -1216,7 +1235,7 @@ ser.close()
 1. **首次使用**：需要进行编码器校准（`calibrate_encoder()`）
 2. **堵转保护**：触发后需要调用`clear_protection()`解除
 3. **位置模式**：运动完成后建议使用`wait_for_position()`等待到位
-4. **速度范围**：0-3000 RPM
+4. **速度范围**：0-6000 RPM
 5. **加速度范围**：0-255档位
 
 ### 多电机控制

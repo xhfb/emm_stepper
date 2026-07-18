@@ -26,6 +26,7 @@ from .parameters import (
     DeviceParams,
     JogParams,
     PositionParams,
+    FastPositionParams,
     HomingParams,
     VersionParams,
     MotorRHParams,
@@ -53,10 +54,13 @@ from .commands import (
     Disable,
     Jog,
     Position,
+    ConfigureFastPosition,
+    FastPositionPulse,
     EStop,
     SyncMove,
     MultiMotor,
     build_command_frame,
+    CommandError,
     # 原点回零命令
     SetHomeZero,
     Home,
@@ -100,7 +104,6 @@ from .commands import (
     SetClosedLoopCurrent,
     SetPID,
     SetMotorDirection,
-    SetPositionWindow,
     SetHeartbeatTime,
     SetAutoRun,
     SetConfig,
@@ -183,6 +186,7 @@ class EmmDevice:
             checksum_mode=checksum_mode,
             delay=delay,
         )
+        self._firmware_version: Optional[int] = None
         
         # 测试连接
         if auto_test:
@@ -198,6 +202,16 @@ class EmmDevice:
         except Exception as e:
             raise ConnectionError(f"无法连接到电机: {e}")
 
+    def _require_fast_position(self) -> None:
+        """快速位置模式需要 V2.0.0+ 固件."""
+        if self._firmware_version is None:
+            self.get_version()
+        if self._firmware_version is None or self._firmware_version < 200:
+            ver = self._firmware_version
+            raise CommandError(
+                f"快速位置模式需要固件 V2.0.0+ (当前: {ver})"
+            )
+
     @property
     def device_params(self) -> DeviceParams:
         """返回设备参数."""
@@ -207,6 +221,21 @@ class EmmDevice:
     def address(self) -> int:
         """返回电机地址."""
         return self._device_params.address
+
+    @property
+    def firmware_version(self) -> Optional[int]:
+        """缓存的固件版本号 (如 200=V2.0.0)；未读取时为 None."""
+        return self._firmware_version
+
+    @property
+    def supports_fast_position(self) -> bool:
+        """是否支持快速位置模式 (F1/FC, V2.0.0+)."""
+        if self._firmware_version is None:
+            try:
+                self.get_version()
+            except Exception:
+                return False
+        return self._firmware_version is not None and self._firmware_version >= 200
 
     # ==================== 触发动作命令 ====================
 
@@ -299,7 +328,7 @@ class EmmDevice:
         电机以指定速度持续运动，直到收到停止命令。
         
         Args:
-            speed: 速度 (0-3000 RPM)
+            speed: 速度 (0-6000 RPM)
             direction: 运动方向
             acceleration: 加速度档位 (0-255)
             sync: 是否使用同步模式
@@ -331,7 +360,7 @@ class EmmDevice:
         
         Args:
             pulse_count: 脉冲数 (正数为CW方向，负数为CCW方向)
-            speed: 速度 (0-3000 RPM)
+            speed: 速度 (0-6000 RPM)
             direction: 运动方向 (如果为None，则根据pulse_count的正负自动判断)
             acceleration: 加速度档位 (0-255)
             motion_mode: 运动模式
@@ -374,7 +403,7 @@ class EmmDevice:
         
         Args:
             degrees: 角度 (正数为CW方向，负数为CCW方向)
-            speed: 速度 (0-3000 RPM)
+            speed: 速度 (0-6000 RPM)
             acceleration: 加速度档位 (0-255)
             motion_mode: 运动模式
             microstep: 细分值 (用于计算脉冲数)
@@ -411,7 +440,7 @@ class EmmDevice:
         
         Args:
             revolutions: 圈数 (正数为CW方向，负数为CCW方向)
-            speed: 速度 (0-3000 RPM)
+            speed: 速度 (0-6000 RPM)
             acceleration: 加速度档位 (0-255)
             motion_mode: 运动模式
             microstep: 细分值 (用于计算脉冲数)
@@ -429,6 +458,87 @@ class EmmDevice:
             microstep=microstep,
             motor_type=motor_type,
             sync=sync,
+        )
+
+    def configure_fast_position(
+        self,
+        speed: int = 100,
+        acceleration: int = 10,
+        motion_mode: MotionMode = MotionMode.RELATIVE_LAST,
+        sync: bool = False,
+    ) -> bool:
+        """快速位置模式设参 (Emm V2.0.0+, F1).
+        
+        先设定速度/加速度/运动模式，后续用 move_fast_pulses 只发脉冲即可运动。
+        
+        Args:
+            speed: 速度 (0-6000 RPM)
+            acceleration: 加速度档位 (0-255)
+            motion_mode: 运动模式
+            sync: 是否使用同步模式
+            
+        Returns:
+            是否成功
+            
+        Raises:
+            CommandError: 固件低于 V2.0.0
+        """
+        self._require_fast_position()
+        params = FastPositionParams(
+            speed=speed,
+            acceleration=acceleration,
+            motion_mode=motion_mode,
+            sync_flag=SyncFlag.SYNC if sync else SyncFlag.IMMEDIATE,
+        )
+        cmd = ConfigureFastPosition(self._device_params, params=params)
+        return cmd.is_success
+
+    def move_fast_pulses(self, pulses: int) -> bool:
+        """快速位置模式发脉冲 (Emm V2.0.0+, FC).
+        
+        需先调用 configure_fast_position。脉冲为有符号 int32，负值反向。
+        
+        Args:
+            pulses: 有符号脉冲数
+            
+        Returns:
+            是否成功
+            
+        Raises:
+            CommandError: 固件低于 V2.0.0
+        """
+        self._require_fast_position()
+        cmd = FastPositionPulse(self._device_params, pulses=pulses)
+        return cmd.is_success
+
+    def move_fast_degrees(
+        self,
+        degrees: float,
+        microstep: int = 16,
+        motor_type: MotorType = MotorType.DEGREE_18,
+    ) -> bool:
+        """快速位置模式运动(角度) — 需已 configure_fast_position.
+        
+        Args:
+            degrees: 角度 (正 CW / 负 CCW，按脉冲符号编码)
+            microstep: 细分值
+            motor_type: 电机步距角类型
+        """
+        pulses_per_revolution = motor_type.full_steps_per_rev * microstep
+        pulses = int(degrees / 360 * pulses_per_revolution)
+        return self.move_fast_pulses(pulses)
+
+    def move_fast_revolutions(
+        self,
+        revolutions: float,
+        microstep: int = 16,
+        motor_type: MotorType = MotorType.DEGREE_18,
+    ) -> bool:
+        """快速位置模式运动(圈数) — 需已 configure_fast_position."""
+        return self.move_fast_degrees(
+            degrees=revolutions * 360,
+            microstep=microstep,
+            motor_type=motor_type,
         )
 
     def stop(self, sync: bool = False) -> bool:
@@ -542,6 +652,8 @@ class EmmDevice:
             版本参数
         """
         cmd = GetVersion(self._device_params)
+        if cmd.data is not None:
+            self._firmware_version = cmd.data.firmware_version
         return cmd.data
 
     def get_motor_rh(self) -> MotorRHParams:
@@ -826,6 +938,9 @@ class EmmDevice:
     def set_position_window(self, window_deg: float = 0.8, store: bool = True) -> bool:
         """修改位置到达窗口.
         
+        Emm 固件对独立命令 D1 07 常返回 EE，因此直接通过配置包改写：
+        get_config → 改 position_window → set_config (5.8.6)。
+        
         Args:
             window_deg: 位置到达窗口(度)
             store: 是否存储
@@ -833,8 +948,13 @@ class EmmDevice:
         Returns:
             是否成功
         """
-        cmd = SetPositionWindow(self._device_params, window_deg=window_deg, store=store)
-        return cmd.is_success
+        try:
+            cfg = self.get_config()
+            cfg.position_window = int(round(window_deg * 10)) & 0xFFFF
+            return self.set_config(cfg, store=store)
+        except Exception as e:
+            logger.error(f"set_position_window 失败: {e}")
+            return False
 
     def set_heartbeat_time(self, time_ms: int = 0, store: bool = True) -> bool:
         """修改心跳保护功能时间.
@@ -903,8 +1023,12 @@ class EmmDevice:
     def set_power_off_flag(self, flag: bool = False) -> bool:
         """修改掉电标志.
         
+        V1 手册: 默认多为 1，写 0 作标记，掉电后恢复 1。
+        V2 / 手册 V1.0.5: 默认多为 0，写 1 作标记，掉电重启变回 0。
+        命令帧相同，语义以实机固件为准。
+        
         Args:
-            flag: 掉电标志, 通常写 False(0) 以便检测后续掉电
+            flag: 掉电标志值
             
         Returns:
             是否成功

@@ -39,6 +39,8 @@ class Code(ExtendedIntEnum):
     MULTI_MOTOR = 0xAA  # 多电机命令
     ENABLE = 0xF3  # 电机使能控制
     JOG = 0xF6  # 速度模式控制(Emm)
+    FAST_POSITION_CFG = 0xF1  # 快速位置模式设参(Emm, V2.0.0+)
+    FAST_POSITION_PULSE = 0xFC  # 快速位置模式发脉冲(Emm, V2.0.0+)
     POSITION = 0xFD  # 位置模式控制(Emm)
     ESTOP = 0xFE  # 立即停止
     SYNC_MOVE = 0xFF  # 触发多机同步运动
@@ -165,7 +167,8 @@ class StatusCode(ExtendedIntEnum):
 
     FIXED_CHECKSUM = 0x6B  # 固定校验码
     SUCCESS = 0x02  # 命令正确
-    AT_ZERO = 0x12  # 触发回零时当前就在零点处
+    AT_ZERO = 0x12  # 零点处或左/右限位已触发，电机不动作
+    LIMIT_OR_HOME = 0x22  # 同 0x12（V1.0.5 新增返回码）
     PARAM_ERROR = 0xE2  # 命令参数错误
     FORMAT_ERROR = 0xEE  # 命令格式错误
     ACTION_COMPLETE = 0x9F  # 动作执行完成

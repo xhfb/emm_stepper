@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "emm_stepper"
-version = "1.0.2"
+version = "1.1.0"
 description = "ZDT X42S 第二代闭环步进电机控制库 (目前仅支持Emm固件)"
 readme = "README.md"
 license = {text = "MIT"}

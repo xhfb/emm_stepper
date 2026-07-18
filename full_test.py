@@ -408,12 +408,11 @@ def test_writes(motor: EmmDevice, flags: Flags) -> List[CaseResult]:
 
     def _pwin() -> str:
         old = motor.get_position_window()
-        ok = motor.set_position_window(1.2, store=False)
+        _require(motor.set_position_window(1.2, store=False), "set 失败")
         mid = motor.get_position_window()
-        if not ok:
-            return f"GET={old:.2f}° OK; SET(D1) 本固件可能 EE (已知)"
-        motor.set_position_window(old, store=False)
-        return f"{old:.2f}->{mid:.2f}"
+        _require(abs(mid - 1.2) < 0.05, f"期望 1.2 得 {mid}")
+        _require(motor.set_position_window(old, store=False), "restore 失败")
+        return f"{old:.2f}->{mid:.2f}->restored"
 
     out.append(_run("set_position_window", _pwin))
 

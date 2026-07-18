@@ -31,6 +31,7 @@ from .parameters import (
     DeviceParams,
     JogParams,
     PositionParams,
+    FastPositionParams,
     HomingParams,
     VersionParams,
     MotorRHParams,
@@ -229,6 +230,9 @@ class SimpleCommand(Command[bool]):
         """解析响应."""
         if data[0] == StatusCode.SUCCESS:
             return True
+        elif data[0] in (StatusCode.AT_ZERO, StatusCode.LIMIT_OR_HOME):
+            logger.warning("零点/限位条件阻止动作 (0x%02X)", data[0])
+            return False
         elif data[0] == StatusCode.PARAM_ERROR:
             logger.warning("命令参数错误")
             return False
@@ -416,10 +420,66 @@ class Position(SimpleCommand):
         return bytes([self.address, self._code]) + self.params.bytes
 
 
+class ConfigureFastPosition(SimpleCommand):
+    """快速位置模式设参 (Emm, V2.0.0+).
+    
+    对应命令: 5.3.13 快速位置模式控制（Emm）— F1
+    发送: 01 F1 03 20 64 00 00 6B
+    返回: 01 F1 02 6B
+    """
+    _code = Code.FAST_POSITION_CFG
+
+    def __init__(
+        self,
+        device: DeviceParams,
+        params: Optional[FastPositionParams] = None,
+        speed: int = 100,
+        acceleration: int = 10,
+        motion_mode: MotionMode = MotionMode.RELATIVE_LAST,
+        sync_flag: SyncFlag = SyncFlag.IMMEDIATE,
+    ):
+        if params:
+            self.params = params
+        else:
+            self.params = FastPositionParams(
+                speed=speed,
+                acceleration=acceleration,
+                motion_mode=motion_mode,
+                sync_flag=sync_flag,
+            )
+        super().__init__(device)
+
+    def _build_command_body(self) -> bytes:
+        return bytes([self.address, self._code]) + self.params.bytes
+
+
+class FastPositionPulse(SimpleCommand):
+    """快速位置模式发脉冲 (Emm, V2.0.0+).
+    
+    对应命令: 5.3.13 快速位置模式控制（Emm）— FC
+    发送: 01 FC 00 00 0C 80 6B
+    返回: 01 FC 02 6B
+    
+    脉冲数为有符号 int32（大端），负值表示反方向。
+    """
+    _code = Code.FAST_POSITION_PULSE
+
+    def __init__(self, device: DeviceParams, pulses: int = 3200):
+        if not -0x80000000 <= pulses <= 0x7FFFFFFF:
+            raise ValueError("脉冲数必须在有符号 int32 范围内")
+        self.pulses = pulses
+        super().__init__(device)
+
+    def _build_command_body(self) -> bytes:
+        return bytes([self.address, self._code]) + self.pulses.to_bytes(
+            4, "big", signed=True
+        )
+
+
 class EStop(SimpleCommand):
     """立即停止.
     
-    对应命令: 5.3.13 立即停止
+    对应命令: 立即停止
     发送: 01 FE 98 00 6B
     返回: 01 FE 02 6B
     """
@@ -1364,11 +1424,14 @@ class SetMotorDirection(SimpleCommand):
 
 
 class SetPositionWindow(SimpleCommand):
-    """修改位置到达窗口.
+    """修改位置到达窗口 (独立命令 D1 07).
     
     对应命令: 5.6.21 修改位置到达窗口（X42S/Y42）
     发送: 01 D1 07 01 0008 6B
     返回: 01 D1 02 6B
+    
+    注意: 部分 Emm 固件对该命令返回 EE。高层 API 请用
+    EmmDevice.set_position_window（经 set_config 改写）。
     """
     _code = Code.SET_POSITION_WINDOW
     _protocol = Protocol.SET_POSITION_WINDOW
