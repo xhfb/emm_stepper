@@ -5,7 +5,7 @@
 """
 
 import logging
-from typing import Optional
+from typing import Optional, List
 
 from serial import Serial
 
@@ -18,6 +18,9 @@ from .configs import (
     MotionMode,
     HomingMode,
     HomingDirection,
+    MotorType,
+    FirmwareType,
+    LockParamLevel,
 )
 from .parameters import (
     DeviceParams,
@@ -32,6 +35,11 @@ from .parameters import (
     SystemStatusParams,
     ConfigParams,
     AutoRunParams,
+    ProtectionThreshold,
+    IOStatus,
+    HomeMotorStatus,
+    OptionStatus,
+    DMX512Params,
 )
 from .commands import (
     # 触发动作命令
@@ -47,6 +55,8 @@ from .commands import (
     Position,
     EStop,
     SyncMove,
+    MultiMotor,
+    build_command_frame,
     # 原点回零命令
     SetHomeZero,
     Home,
@@ -63,14 +73,25 @@ from .commands import (
     GetEncoder,
     GetPulseCount,
     GetTargetPosition,
+    GetRealtimeTarget,
     GetRealtimeSpeed,
     GetRealtimePosition,
     GetPositionError,
     GetTemperature,
     GetMotorStatus,
+    GetHomeMotorStatus,
+    GetIOStatus,
+    TimedReturn,
     GetPID,
     GetConfig,
     GetSystemStatus,
+    GetOptionStatus,
+    GetDMX512Params,
+    GetPositionWindow,
+    GetProtectionThreshold,
+    GetHeartbeatTime,
+    GetIntegralStiffness,
+    GetCollisionReturnAngle,
     # 设置命令
     SetID,
     SetMicrostep,
@@ -85,6 +106,14 @@ from .commands import (
     SetConfig,
     SetScaleInput,
     SetLockButton,
+    SetPowerOffFlag,
+    SetMotorType,
+    SetFirmwareType,
+    SetDMX512Params,
+    SetProtectionThreshold,
+    SetIntegralStiffness,
+    SetCollisionReturnAngle,
+    SetLockParam,
     BroadcastGetID,
 )
 
@@ -336,6 +365,7 @@ class EmmDevice:
         acceleration: int = 10,
         motion_mode: MotionMode = MotionMode.RELATIVE_LAST,
         microstep: int = 16,
+        motor_type: MotorType = MotorType.DEGREE_18,
         sync: bool = False,
     ) -> bool:
         """位置模式运动(角度).
@@ -348,13 +378,13 @@ class EmmDevice:
             acceleration: 加速度档位 (0-255)
             motion_mode: 运动模式
             microstep: 细分值 (用于计算脉冲数)
+            motor_type: 电机步距角类型 (1.8°→200整步/圈, 0.9°→400整步/圈)
             sync: 是否使用同步模式
             
         Returns:
             是否成功
         """
-        # 计算脉冲数: 1.8°电机，一圈200步，细分后一圈 = 200 * microstep 脉冲
-        pulses_per_revolution = 200 * microstep
+        pulses_per_revolution = motor_type.full_steps_per_rev * microstep
         pulse_count = int(degrees / 360 * pulses_per_revolution)
         
         return self.move_pulses(
@@ -372,6 +402,7 @@ class EmmDevice:
         acceleration: int = 10,
         motion_mode: MotionMode = MotionMode.RELATIVE_LAST,
         microstep: int = 16,
+        motor_type: MotorType = MotorType.DEGREE_18,
         sync: bool = False,
     ) -> bool:
         """位置模式运动(圈数).
@@ -384,6 +415,7 @@ class EmmDevice:
             acceleration: 加速度档位 (0-255)
             motion_mode: 运动模式
             microstep: 细分值 (用于计算脉冲数)
+            motor_type: 电机步距角类型
             sync: 是否使用同步模式
             
         Returns:
@@ -395,6 +427,7 @@ class EmmDevice:
             acceleration=acceleration,
             motion_mode=motion_mode,
             microstep=microstep,
+            motor_type=motor_type,
             sync=sync,
         )
 
@@ -583,6 +616,15 @@ class EmmDevice:
         cmd = GetTargetPosition(self._device_params)
         return cmd.data
 
+    def get_realtime_target(self) -> float:
+        """读取电机实时设定的目标位置.
+        
+        Returns:
+            实时设定目标位置角度(度)
+        """
+        cmd = GetRealtimeTarget(self._device_params)
+        return cmd.data
+
     def get_realtime_speed(self) -> int:
         """读取电机实时转速.
         
@@ -627,6 +669,37 @@ class EmmDevice:
         """
         cmd = GetMotorStatus(self._device_params)
         return cmd.data
+
+    def get_home_motor_status(self) -> HomeMotorStatus:
+        """读取回零状态标志 + 电机状态标志.
+        
+        Returns:
+            组合状态
+        """
+        cmd = GetHomeMotorStatus(self._device_params)
+        return cmd.data
+
+    def get_io_status(self) -> IOStatus:
+        """读取引脚 IO 电平状态.
+        
+        Returns:
+            IO状态
+        """
+        cmd = GetIOStatus(self._device_params)
+        return cmd.data
+
+    def timed_return(self, info_code: int, interval_ms: int = 0) -> bool:
+        """定时返回信息命令.
+        
+        Args:
+            info_code: 信息功能码(如 Code.GET_REALTIME_POSITION)
+            interval_ms: 定时周期(ms), 0表示停止返回
+            
+        Returns:
+            是否成功配置
+        """
+        cmd = TimedReturn(self._device_params, info_code=info_code, interval_ms=interval_ms)
+        return cmd.is_success
 
     def get_pid(self) -> PIDParams:
         """读取PID参数.
@@ -826,6 +899,241 @@ class EmmDevice:
         """
         cmd = SetLockButton(self._device_params, lock=lock, store=store)
         return cmd.is_success
+
+    def set_power_off_flag(self, flag: bool = False) -> bool:
+        """修改掉电标志.
+        
+        Args:
+            flag: 掉电标志, 通常写 False(0) 以便检测后续掉电
+            
+        Returns:
+            是否成功
+        """
+        cmd = SetPowerOffFlag(self._device_params, flag=flag)
+        return cmd.is_success
+
+    def get_option_status(self) -> OptionStatus:
+        """读取选项参数状态.
+        
+        注意: 部分固件该帧字段可能不可信，勿单独用于判固件类型。
+        
+        Returns:
+            选项状态
+        """
+        cmd = GetOptionStatus(self._device_params)
+        return cmd.data
+
+    def set_motor_type(
+        self,
+        motor_type: MotorType = MotorType.DEGREE_18,
+        store: bool = True,
+    ) -> bool:
+        """修改电机类型.
+        
+        Args:
+            motor_type: MotorType.DEGREE_18(0x19) / DEGREE_09(0x32)
+            store: 是否存储
+            
+        Returns:
+            是否成功 (修改后需重新空载校准)
+        """
+        cmd = SetMotorType(self._device_params, motor_type=motor_type, store=store)
+        return cmd.is_success
+
+    def set_firmware_type(
+        self,
+        firmware_type: FirmwareType = FirmwareType.EMM_FIRMWARE,
+        store: bool = True,
+    ) -> bool:
+        """修改固件类型.
+        
+        Args:
+            firmware_type: X / Emm / Emm狂暴
+            store: 是否存储
+            
+        Returns:
+            是否成功
+        """
+        cmd = SetFirmwareType(
+            self._device_params, firmware_type=firmware_type, store=store
+        )
+        return cmd.is_success
+
+    def get_dmx512_params(self) -> DMX512Params:
+        """读取 DMX512 协议参数.
+        
+        Returns:
+            DMX512参数
+        """
+        cmd = GetDMX512Params(self._device_params)
+        return cmd.data
+
+    def set_dmx512_params(self, params: DMX512Params, store: bool = True) -> bool:
+        """修改 DMX512 协议参数.
+        
+        Args:
+            params: DMX512参数
+            store: 是否存储
+            
+        Returns:
+            是否成功
+        """
+        cmd = SetDMX512Params(self._device_params, params=params, store=store)
+        return cmd.is_success
+
+    def get_position_window(self) -> float:
+        """读取位置到达窗口.
+        
+        Returns:
+            位置到达窗口(度)
+        """
+        cmd = GetPositionWindow(self._device_params)
+        return cmd.data
+
+    def get_protection_threshold(self) -> ProtectionThreshold:
+        """读取过热过流保护检测阈值.
+        
+        Returns:
+            保护阈值参数
+        """
+        cmd = GetProtectionThreshold(self._device_params)
+        return cmd.data
+
+    def set_protection_threshold(
+        self,
+        params: ProtectionThreshold,
+        store: bool = True,
+    ) -> bool:
+        """修改过热过流保护检测阈值.
+        
+        Args:
+            params: 保护阈值参数
+            store: 是否存储
+            
+        Returns:
+            是否成功
+        """
+        cmd = SetProtectionThreshold(self._device_params, params=params, store=store)
+        return cmd.is_success
+
+    def get_heartbeat_time(self) -> int:
+        """读取心跳保护功能时间.
+        
+        Returns:
+            心跳保护时间(ms), 0表示关闭
+        """
+        cmd = GetHeartbeatTime(self._device_params)
+        return cmd.data
+
+    def get_integral_stiffness(self) -> int:
+        """读取积分限幅/刚性系数.
+        
+        Returns:
+            Emm固件为积分限幅, 默认65535
+        """
+        cmd = GetIntegralStiffness(self._device_params)
+        return cmd.data
+
+    def set_integral_stiffness(self, value: int = 65535, store: bool = True) -> bool:
+        """修改积分限幅/刚性系数.
+        
+        Args:
+            value: 积分限幅值
+            store: 是否存储
+            
+        Returns:
+            是否成功
+        """
+        cmd = SetIntegralStiffness(self._device_params, value=value, store=store)
+        return cmd.is_success
+
+    def get_collision_return_angle(self) -> float:
+        """读取碰撞回零返回角度.
+        
+        Returns:
+            返回角度(度); 0表示按电流检测返回
+        """
+        cmd = GetCollisionReturnAngle(self._device_params)
+        return cmd.data
+
+    def set_collision_return_angle(
+        self,
+        angle_deg: float = 0.0,
+        store: bool = True,
+    ) -> bool:
+        """修改碰撞回零返回角度.
+        
+        Args:
+            angle_deg: 返回角度(度), 0表示按电流检测返回
+            store: 是否存储
+            
+        Returns:
+            是否成功
+        """
+        cmd = SetCollisionReturnAngle(
+            self._device_params, angle_deg=angle_deg, store=store
+        )
+        return cmd.is_success
+
+    def set_lock_param(
+        self,
+        level: LockParamLevel = LockParamLevel.UNLOCKED,
+        store: bool = True,
+    ) -> bool:
+        """修改锁定修改参数功能.
+        
+        Args:
+            level: 锁定等级 0-3
+            store: 是否存储
+            
+        Returns:
+            是否成功
+        """
+        cmd = SetLockParam(self._device_params, level=level, store=store)
+        return cmd.is_success
+
+    @staticmethod
+    def multi_motor(
+        serial_connection: Serial,
+        frames: List[bytes],
+        checksum_mode: ChecksumMode = ChecksumMode.FIXED,
+        expect_ack: bool = True,
+        delay: Optional[float] = None,
+    ) -> bool:
+        """发送多电机命令.
+        
+        Args:
+            serial_connection: 串口连接
+            frames: 已含校验码的完整子命令帧列表
+            checksum_mode: 外层校验模式
+            expect_ack: 是否等待地址1的确认(仅运动类命令地址1会回复)
+            delay: 通讯延迟
+            
+        Returns:
+            是否成功
+            
+        Example:
+            from emm_stepper.commands import build_command_frame
+            from emm_stepper.configs import Code, add_checksum
+            frame = build_command_frame(bytes([2, Code.GET_REALTIME_POSITION]), ...)
+            EmmDevice.multi_motor(ser, [frame], expect_ack=False)
+        """
+        device_params = DeviceParams(
+            serial_connection=serial_connection,
+            address=Address.BROADCAST,
+            checksum_mode=checksum_mode,
+            delay=delay,
+        )
+        cmd = MultiMotor(device_params, frames=frames, expect_ack=expect_ack)
+        return cmd.is_success
+
+    @staticmethod
+    def build_frame(
+        body: bytes,
+        checksum_mode: ChecksumMode = ChecksumMode.FIXED,
+    ) -> bytes:
+        """构建含校验码的完整命令帧(用于 multi_motor 子帧)."""
+        return build_command_frame(body, checksum_mode)
 
     @staticmethod
     def broadcast_get_id(serial_connection: Serial) -> int:

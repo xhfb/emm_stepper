@@ -76,6 +76,7 @@ class Code(ExtendedIntEnum):
     GET_POSITION_WINDOW = 0x41  # 读取位置到达窗口
     GET_SYS_STATUS = 0x43  # 读取系统状态参数
     GET_CONFIG = 0x42  # 读取驱动配置参数
+    GET_DMX512_PARAM = 0x49  # 读取DMX512协议参数
 
     # 读写驱动参数命令
     GET_PROTECTION_THRESHOLD = 0x13  # 读取过热过流保护检测阈值
@@ -140,7 +141,8 @@ class Protocol(ExtendedIntEnum):
     SET_ID = 0x4B
     SET_OPEN_LOOP_CURRENT = 0x33
     SET_CLOSED_LOOP_CURRENT = 0x66
-    SET_LOOP_MODE = 0xA6
+    # 手册 V1.0.3 写 A6；实机固件 V1.0.7 需 0x69（A6 返回 EE）
+    SET_LOOP_MODE = 0x69
     SET_CONFIG = 0xD1
     SET_PID = 0xC3
     SET_AUTO_RUN = 0x1C
@@ -277,12 +279,20 @@ class ControlMode(ExtendedIntEnum):
 
 
 class MotorType(ExtendedIntEnum):
-    """电机类型."""
+    """电机类型 (Emm 配置/5.8.5-5.8.6).
 
-    DEGREE_09 = 0x19  # 0.9度步进电机
-    DEGREE_18 = 0x32  # 1.8度步进电机
+    实机与说明书示例确认: 0x19=1.8°, 0x32=0.9°。
+    """
+
+    DEGREE_18 = 0x19  # 1.8度步进电机
+    DEGREE_09 = 0x32  # 0.9度步进电机
 
     default = DEGREE_18
+
+    @property
+    def full_steps_per_rev(self) -> int:
+        """整步数/圈: 1.8°→200, 0.9°→400."""
+        return 400 if self == MotorType.DEGREE_09 else 200
 
 
 class FirmwareType(ExtendedIntEnum):
@@ -293,6 +303,17 @@ class FirmwareType(ExtendedIntEnum):
     EMM_TURBO = 2  # Emm固件狂暴模式
 
     default = EMM_FIRMWARE
+
+
+class LockParamLevel(ExtendedIntEnum):
+    """锁定修改参数等级 (5.6.31)."""
+
+    UNLOCKED = 0  # 解锁，可修改任意参数
+    PARTIAL = 1  # 禁止修改 ID/通讯速率/协议/端口复用
+    FULL = 2  # 禁止修改所有参数 + 触发校准
+    FULL_STRICT = 3  # 同 FULL
+
+    default = UNLOCKED
 
 
 class BaudRate(ExtendedIntEnum):

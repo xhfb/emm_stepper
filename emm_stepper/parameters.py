@@ -455,13 +455,13 @@ class ConfigParams:
     microstep_interp: bool = True
     open_loop_current: int = 1200  # mA
     closed_loop_current: int = 3000  # mA
-    max_voltage: int = 4000  # *3 mV
+    max_voltage: int = 4000  # 闭环最大输出电压原始值; 实际 mV = value * 3
     baud_rate: BaudRate = BaudRate.BAUD_115200
     can_rate: CanRate = CanRate.CAN_500K
-    motor_id: int = 1
+    motor_id: int = 1  # 仅读取有效; SET 配置时该位为保留字节须写 0
     checksum_mode: ChecksumMode = ChecksumMode.FIXED
     response_mode: ResponseMode = ResponseMode.RECEIVE
-    stall_protect: StallProtect = StallProtect.ENABLE
+    stall_protect: StallProtect = StallProtect.ENABLE  # 0/1/2 均有效
     stall_speed: int = 8  # RPM
     stall_current: int = 2200  # mA
     stall_time: int = 2000  # ms
@@ -469,7 +469,11 @@ class ConfigParams:
 
     @property
     def bytes(self) -> bytes:
-        """返回命令字节."""
+        """返回 5.8.6 修改驱动配置参数 的数据区字节.
+
+        注意: 读配置 data[16] 为电机 ID; 写配置同一位置为保留字节, 必须为 0。
+        修改地址请使用 set_id (0xAE), 勿通过 set_config 写入 ID。
+        """
         return bytes([
             self.motor_type,
             self.pulse_port_mode,
@@ -478,7 +482,7 @@ class ConfigParams:
             self.dir_level,
             self.microstep,
             1 if self.microstep_interp else 0,
-            0,  # 保留
+            0,  # 保留 (读配置时为自动熄屏)
             (self.open_loop_current >> 8) & 0xFF,
             self.open_loop_current & 0xFF,
             (self.closed_loop_current >> 8) & 0xFF,
@@ -487,7 +491,7 @@ class ConfigParams:
             self.max_voltage & 0xFF,
             self.baud_rate,
             self.can_rate,
-            self.motor_id,
+            0,  # 保留 (读配置时为 ID/地址)
             self.checksum_mode,
             self.response_mode,
             self.stall_protect,
@@ -503,7 +507,7 @@ class ConfigParams:
 
     @classmethod
     def from_bytes(cls, data: bytes) -> "ConfigParams":
-        """从字节数据解析配置参数."""
+        """从 5.8.5 读取驱动配置参数 的数据区解析."""
         return cls(
             motor_type=MotorType(data[0]),
             pulse_port_mode=PulsePortMode(data[1]),
@@ -531,6 +535,11 @@ class ConfigParams:
     def position_window_deg(self) -> float:
         """返回位置到达窗口(度)."""
         return self.position_window * 0.1
+
+    @property
+    def max_voltage_mv(self) -> int:
+        """闭环最大输出电压 (mV), 原始值 × 3."""
+        return self.max_voltage * 3
 
 
 @dataclass
@@ -588,3 +597,129 @@ class AutoRunParams:
             self.acceleration,
             1 if self.enable_en_control else 0,
         ])
+
+
+@dataclass
+class IOStatus:
+    """引脚 IO 电平状态.
+    
+    对应命令: 5.5.17 读取引脚IO电平状态（X42S/Y42）
+    """
+    en_pin: bool = False  # En引脚高电平
+    step_pin: bool = False  # 脉冲引脚高电平
+    dir_pin: bool = False  # 方向引脚高电平
+    dir_output_mode: bool = False  # 方向引脚为输出模式
+
+    @classmethod
+    def from_byte(cls, data: int) -> "IOStatus":
+        return cls(
+            en_pin=bool(data & 0x01),
+            step_pin=bool(data & 0x04),
+            dir_pin=bool(data & 0x10),
+            dir_output_mode=bool(data & 0x20),
+        )
+
+
+@dataclass
+class HomeMotorStatus:
+    """回零状态 + 电机状态.
+    
+    对应命令: 5.5.16 读取回零状态标志+电机状态标志
+    """
+    homing: HomingStatus = field(default_factory=HomingStatus)
+    motor: MotorStatus = field(default_factory=MotorStatus)
+
+    @classmethod
+    def from_bytes(cls, data: bytes) -> "HomeMotorStatus":
+        return cls(
+            homing=HomingStatus.from_byte(data[0]),
+            motor=MotorStatus.from_byte(data[1]),
+        )
+
+
+@dataclass
+class OptionStatus:
+    """选项参数状态.
+    
+    对应命令: 5.6.4 读取选项参数状态（X42S/Y42）
+    
+    注意: 部分固件上该帧字段(尤其 FwType)可能不可信，勿单独用于判固件类型。
+    实机(V1.0.7)返回 2 字节: 低字节为手册 bit0-bit7，高字节低 2 位为锁定等级。
+    """
+    motor_is_09_degree: bool = False  # True=0.9°, False=1.8°
+    firmware_is_emm: bool = True  # True=Emm, False=X
+    closed_loop: bool = True
+    direction_ccw: bool = False  # True=CCW为正方向
+    button_locked: bool = False
+    scale_input: bool = False  # 速度缩小10倍输入
+    lock_param_level: int = 0  # 0-3, 见 LockParamLevel
+    raw: int = 0  # 原始 16-bit (高字节在前时为 data0<<8|data1 的相反——此处存 LE: b0|(b1<<8))
+
+    @classmethod
+    def from_byte(cls, data: int) -> "OptionStatus":
+        return cls.from_bytes(bytes([data & 0xFF]))
+
+    @classmethod
+    def from_bytes(cls, data: bytes) -> "OptionStatus":
+        b0 = data[0] if data else 0
+        b1 = data[1] if len(data) > 1 else 0
+        return cls(
+            motor_is_09_degree=bool(b0 & 0x01),
+            firmware_is_emm=bool(b0 & 0x02),
+            closed_loop=bool(b0 & 0x04),
+            direction_ccw=bool(b0 & 0x10),
+            button_locked=bool(b0 & 0x20),
+            scale_input=bool(b0 & 0x80),
+            lock_param_level=b1 & 0x03,
+            raw=b0 | (b1 << 8),
+        )
+
+
+@dataclass
+class DMX512Params:
+    """DMX512 协议参数.
+    
+    对应命令: 5.6.18/5.6.19 读取/修改DMX512协议参数
+    """
+    total_channels: int = 192  # 总通道数 1-64(手册示例默认192)
+    channels_per_motor: int = 1  # 1=单通道, 2=双通道
+    absolute_mode: bool = True  # True=绝对位置, False=相对位置
+    single_channel_speed: int = 1000  # RPM
+    acceleration: int = 1000  # Emm: acc=值/8
+    dual_speed_step: int = 10  # 双通道速度步长 RPM
+    dual_motion_step: int = 100  # 双通道运动步长(×0.1°)
+
+    @property
+    def dual_motion_step_deg(self) -> float:
+        return self.dual_motion_step * 0.1
+
+    @property
+    def bytes(self) -> bytes:
+        return bytes([
+            (self.total_channels >> 8) & 0xFF,
+            self.total_channels & 0xFF,
+            self.channels_per_motor,
+            1 if self.absolute_mode else 0,
+            (self.single_channel_speed >> 8) & 0xFF,
+            self.single_channel_speed & 0xFF,
+            (self.acceleration >> 8) & 0xFF,
+            self.acceleration & 0xFF,
+            (self.dual_speed_step >> 8) & 0xFF,
+            self.dual_speed_step & 0xFF,
+            (self.dual_motion_step >> 24) & 0xFF,
+            (self.dual_motion_step >> 16) & 0xFF,
+            (self.dual_motion_step >> 8) & 0xFF,
+            self.dual_motion_step & 0xFF,
+        ])
+
+    @classmethod
+    def from_bytes(cls, data: bytes) -> "DMX512Params":
+        return cls(
+            total_channels=to_int(data[0:2]),
+            channels_per_motor=data[2],
+            absolute_mode=bool(data[3]),
+            single_channel_speed=to_int(data[4:6]),
+            acceleration=to_int(data[6:8]),
+            dual_speed_step=to_int(data[8:10]),
+            dual_motion_step=to_int(data[10:14]),
+        )

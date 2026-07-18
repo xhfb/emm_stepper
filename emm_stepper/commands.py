@@ -6,7 +6,7 @@
 import logging
 from abc import ABC, abstractmethod
 from time import sleep, time
-from typing import Optional, TypeVar, Generic, Any
+from typing import Optional, TypeVar, Generic, Any, List
 
 from .configs import (
     Code,
@@ -20,6 +20,9 @@ from .configs import (
     EnableFlag,
     HomingMode,
     MotionMode,
+    MotorType,
+    FirmwareType,
+    LockParamLevel,
     add_checksum,
     calculate_checksum,
     SystemConstants,
@@ -38,6 +41,10 @@ from .parameters import (
     ConfigParams,
     ProtectionThreshold,
     AutoRunParams,
+    IOStatus,
+    HomeMotorStatus,
+    OptionStatus,
+    DMX512Params,
     to_int,
     to_signed_int,
 )
@@ -229,6 +236,11 @@ class SimpleCommand(Command[bool]):
             logger.warning("命令格式错误")
             return False
         return False
+
+    @property
+    def is_success(self) -> bool:
+        """以返回状态字节为准(避免任意响应都被标为成功)."""
+        return bool(self._data)
 
 
 class ReadCommand(Command[T]):
@@ -427,14 +439,99 @@ class SyncMove(SimpleCommand):
     
     对应命令: 5.3.14 触发多机同步运动
     发送: 00 FF 66 6B
-    返回: 01 FF 02 6B
+    返回: 01 FF 02 6B (仅地址1回复)
     """
     _code = Code.SYNC_MOVE
     _protocol = Protocol.SYNC_MOVE
 
+    def __init__(self, device: DeviceParams):
+        # 广播发送、期望地址1回复；不得永久改写调用方的 address
+        saved = device.address
+        device.address = Address(Address.BROADCAST)
+        try:
+            super().__init__(device)
+        finally:
+            device.address = saved
+
     def _build_command_body(self) -> bytes:
-        # 使用广播地址
         return bytes([Address.BROADCAST, self._code, self._protocol])
+
+
+class MultiMotor(Command[bool]):
+    """多电机命令.
+    
+    对应命令: 5.3.1 多电机命令（X42S/Y42）
+    发送: 00 AA + 字节长度 + 子命令... + 6B
+    
+    子命令须为已含校验码的完整帧。运动类命令仅地址1会回复确认。
+    """
+    _code = Code.MULTI_MOTOR
+    _response_length = 4
+
+    def __init__(
+        self,
+        device: DeviceParams,
+        frames: List[bytes],
+        expect_ack: bool = True,
+    ):
+        if not frames:
+            raise ValueError("多电机命令至少需要一条子命令")
+        self.frames = frames
+        self.expect_ack = expect_ack
+        device.address = Address(Address.BROADCAST)
+        super().__init__(device)
+
+    def _build_command_body(self) -> bytes:
+        payload = b"".join(self.frames)
+        # 总字节数 = 整帧长度(地址+功能码+长度字段+子命令+外层校验)
+        total_len = 5 + len(payload)
+        return bytes([
+            Address.BROADCAST,
+            self._code,
+            (total_len >> 8) & 0xFF,
+            total_len & 0xFF,
+        ]) + payload
+
+    def _parse_response(self, data: bytes) -> bool:
+        if not data:
+            return True
+        return data[0] == StatusCode.SUCCESS
+
+    def _execute(self) -> None:
+        # 多电机帧禁止重试：位置/速度子命令重复发送会导致多转
+        try:
+            in_waiting = self.serial.in_waiting
+            if in_waiting > 0:
+                self.serial.read(in_waiting)
+            self.serial.reset_input_buffer()
+            self.serial.reset_output_buffer()
+            logger.debug(f"发送多电机命令: {self._command.hex()}")
+            self.serial.write(self._command)
+            self.serial.flush()
+            if not self.expect_ack:
+                self._status = StatusCode.SUCCESS
+                self._data = True
+                self._response = self._command
+                return
+            response = self._read_response()
+            if response:
+                self._response = response
+                self._status = StatusCode.SUCCESS
+            else:
+                # 已发出去，勿重发；无 ACK 仍视为发送成功
+                logger.warning("多电机命令未收到确认，但不会重发")
+                self._status = StatusCode.SUCCESS
+                self._data = True
+        except Exception as e:
+            logger.warning(f"多电机命令执行异常(不重发): {e}")
+            # 帧可能已发出，标记成功避免上层误判为未发送
+            self._status = StatusCode.SUCCESS
+            self._data = True
+
+
+def build_command_frame(body: bytes, checksum_mode: ChecksumMode = ChecksumMode.FIXED) -> bytes:
+    """构建含校验码的完整命令帧(用于多电机命令子帧)."""
+    return add_checksum(body, checksum_mode)
 
 
 # ==================== 原点回零命令 ====================
@@ -467,7 +564,7 @@ class Home(SimpleCommand):
     
     对应命令: 5.4.2 触发回零
     发送: 01 9A 00 00 6B
-    返回: 01 9A 02 6B
+    返回: 01 9A 02 6B (已在零点时可能为 12)
     """
     _code = Code.HOME
 
@@ -479,6 +576,17 @@ class Home(SimpleCommand):
 
     def _build_command_body(self) -> bytes:
         return bytes([self.address, self._code, self.mode, self.sync_flag])
+
+    def _parse_response(self, data: bytes) -> bool:
+        if data[0] in (StatusCode.SUCCESS, StatusCode.AT_ZERO):
+            return True
+        if data[0] == StatusCode.PARAM_ERROR:
+            logger.warning("回零命令参数错误(若已在零点可先离开再试)")
+            return False
+        if data[0] == StatusCode.FORMAT_ERROR:
+            logger.warning("回零命令格式错误")
+            return False
+        return False
 
 
 class StopHome(SimpleCommand):
@@ -699,6 +807,28 @@ class GetTargetPosition(Command[float]):
         return (value * 360) / 65536
 
 
+class GetRealtimeTarget(Command[float]):
+    """读取电机实时设定的目标位置.
+    
+    对应命令: 5.5.10 读取电机实时设定的目标位置
+    发送: 01 34 6B
+    返回: 01 34 + 5字节数据 + 6B
+    """
+    _code = Code.GET_REALTIME_TARGET
+    _response_length = 8
+
+    def _build_command_body(self) -> bytes:
+        return bytes([self.address, self._code])
+
+    def _parse_response(self, data: bytes) -> float:
+        """返回实时设定目标位置角度(度).
+        
+        Emm固件: 0-65535表示一圈0-360°
+        """
+        value = to_signed_int(data)
+        return (value * 360) / 65536
+
+
 class GetRealtimeSpeed(Command[int]):
     """读取电机实时转速.
     
@@ -796,6 +926,95 @@ class GetMotorStatus(Command[MotorStatus]):
 
     def _parse_response(self, data: bytes) -> MotorStatus:
         return MotorStatus.from_byte(data[0])
+
+
+class GetHomeMotorStatus(Command[HomeMotorStatus]):
+    """读取回零状态标志 + 电机状态标志.
+    
+    对应命令: 5.5.16 读取回零状态标志+电机状态标志（X42S/Y42）
+    发送: 01 3C 6B
+    返回: 01 3C + 2字节数据 + 6B
+    """
+    _code = Code.GET_HOME_MOTOR_STATUS
+    _response_length = 5
+
+    def _build_command_body(self) -> bytes:
+        return bytes([self.address, self._code])
+
+    def _parse_response(self, data: bytes) -> HomeMotorStatus:
+        return HomeMotorStatus.from_bytes(data)
+
+
+class GetIOStatus(Command[IOStatus]):
+    """读取引脚 IO 电平状态.
+    
+    对应命令: 5.5.17 读取引脚IO电平状态（X42S/Y42）
+    发送: 01 3D 6B
+    返回: 01 3D + 1字节数据 + 6B
+    """
+    _code = Code.GET_IO_STATUS
+    _response_length = 4
+
+    def _build_command_body(self) -> bytes:
+        return bytes([self.address, self._code])
+
+    def _parse_response(self, data: bytes) -> IOStatus:
+        return IOStatus.from_byte(data[0])
+
+
+class TimedReturn(Command[Optional[bytes]]):
+    """定时返回信息命令.
+    
+    对应命令: 5.5.1 定时返回信息命令（X42S/Y42）
+    发送: 01 11 18 + 信息功能码 + 定时时间(ms) + 6B
+    定时时间为0时停止返回，确认帧为 Addr 11 6B。
+    """
+    _code = Code.TIMED_RETURN
+    _protocol = Protocol.TIMED_RETURN
+
+    # 常见信息功能码对应的完整响应长度(含地址/功能码/校验)
+    _INFO_RESPONSE_LENGTH = {
+        Code.GET_VERSION: 7,
+        Code.GET_MOTOR_RH: 7,
+        Code.GET_BUS_VOLTAGE: 5,
+        Code.GET_BUS_CURRENT: 5,
+        Code.GET_PHASE_CURRENT: 5,
+        Code.GET_ENCODER: 5,
+        Code.GET_PULSE_COUNT: 7,
+        Code.GET_TARGET_POSITION: 8,
+        Code.GET_REALTIME_TARGET: 8,
+        Code.GET_REALTIME_SPEED: 6,
+        Code.GET_REALTIME_POSITION: 8,
+        Code.GET_POSITION_ERROR: 8,
+        Code.GET_TEMPERATURE: 5,
+        Code.GET_MOTOR_STATUS: 4,
+        Code.GET_HOME_STATUS: 4,
+        Code.GET_HOME_MOTOR_STATUS: 5,
+        Code.GET_IO_STATUS: 4,
+    }
+
+    def __init__(self, device: DeviceParams, info_code: int, interval_ms: int = 0):
+        self.info_code = info_code & 0xFF
+        self.interval_ms = max(0, min(interval_ms, 0xFFFF))
+        if self.interval_ms == 0:
+            # 实机停止确认: Addr 11 02 6B（手册示例偶发省略状态字节）
+            self._response_length = 4
+        else:
+            self._response_length = self._INFO_RESPONSE_LENGTH.get(self.info_code, 8)
+        super().__init__(device)
+
+    def _build_command_body(self) -> bytes:
+        return bytes([
+            self.address,
+            self._code,
+            self._protocol,
+            self.info_code,
+            (self.interval_ms >> 8) & 0xFF,
+            self.interval_ms & 0xFF,
+        ])
+
+    def _parse_response(self, data: bytes) -> Optional[bytes]:
+        return data if data else None
 
 
 class GetPID(Command[PIDParams]):
@@ -1308,6 +1527,334 @@ class SetLockButton(SimpleCommand):
             self._protocol,
             StoreFlag.STORE if self.store else StoreFlag.NO_STORE,
             1 if self.lock else 0,
+        ])
+
+
+class SetPowerOffFlag(SimpleCommand):
+    """修改掉电标志.
+    
+    对应命令: 5.6.3 修改掉电标志
+    发送: 01 50 00 6B
+    返回: 01 50 02 6B
+    """
+    _code = Code.SET_POWER_OFF_FLAG
+
+    def __init__(self, device: DeviceParams, flag: bool = False):
+        self.flag = flag
+        super().__init__(device)
+
+    def _build_command_body(self) -> bytes:
+        return bytes([self.address, self._code, 1 if self.flag else 0])
+
+
+class GetOptionStatus(Command[OptionStatus]):
+    """读取选项参数状态.
+    
+    对应命令: 5.6.4 读取选项参数状态（X42S/Y42）
+    发送: 01 1A 6B
+    返回: 01 1A + 2字节数据 + 6B (实机 V1.0.7 为双字节，含锁定等级)
+    
+    注意: 部分固件该帧字段可能不可信。
+    """
+    _code = Code.GET_OPTION_STATUS
+    _response_length = 5
+
+    def _build_command_body(self) -> bytes:
+        return bytes([self.address, self._code])
+
+    def _parse_response(self, data: bytes) -> OptionStatus:
+        return OptionStatus.from_bytes(data)
+
+
+class SetMotorType(SimpleCommand):
+    """修改电机类型.
+    
+    对应命令: 5.6.5 修改电机类型
+    发送: 01 D7 35 01 19 6B (1.8°)
+    返回: 01 D7 02 6B
+    
+    实机确认: 0x19=1.8°, 0x32=0.9°。修改后需重新空载校准。
+    """
+    _code = Code.SET_MOTOR_TYPE
+    _protocol = Protocol.SET_MOTOR_TYPE
+
+    def __init__(
+        self,
+        device: DeviceParams,
+        motor_type: MotorType = MotorType.DEGREE_18,
+        store: bool = True,
+    ):
+        self.motor_type = motor_type
+        self.store = store
+        super().__init__(device)
+
+    def _build_command_body(self) -> bytes:
+        return bytes([
+            self.address,
+            self._code,
+            self._protocol,
+            StoreFlag.STORE if self.store else StoreFlag.NO_STORE,
+            int(self.motor_type),
+        ])
+
+
+class SetFirmwareType(SimpleCommand):
+    """修改固件类型.
+    
+    对应命令: 5.6.6 修改固件类型
+    发送: 01 D5 69 01 01 6B
+    返回: 01 D5 02 6B
+    
+    建议在电机停止时修改。
+    """
+    _code = Code.SET_FIRMWARE_TYPE
+    _protocol = Protocol.SET_FIRMWARE_TYPE
+
+    def __init__(
+        self,
+        device: DeviceParams,
+        firmware_type: FirmwareType = FirmwareType.EMM_FIRMWARE,
+        store: bool = True,
+    ):
+        self.firmware_type = firmware_type
+        self.store = store
+        super().__init__(device)
+
+    def _build_command_body(self) -> bytes:
+        return bytes([
+            self.address,
+            self._code,
+            self._protocol,
+            StoreFlag.STORE if self.store else StoreFlag.NO_STORE,
+            int(self.firmware_type),
+        ])
+
+
+class GetDMX512Params(Command[DMX512Params]):
+    """读取 DMX512 协议参数.
+    
+    对应命令: 5.6.18 读取DMX512协议参数（X42S/Y42）
+    发送: 01 49 78 6B
+    """
+    _code = Code.GET_DMX512_PARAM
+    _protocol = Protocol.GET_DMX512_PARAM
+    _response_length = 17
+
+    def _build_command_body(self) -> bytes:
+        return bytes([self.address, self._code, self._protocol])
+
+    def _parse_response(self, data: bytes) -> DMX512Params:
+        return DMX512Params.from_bytes(data)
+
+
+class SetDMX512Params(SimpleCommand):
+    """修改 DMX512 协议参数.
+    
+    对应命令: 5.6.19 修改DMX512协议参数（X42S/Y42）
+    """
+    _code = Code.SET_DMX512_PARAM
+    _protocol = Protocol.SET_DMX512_PARAM
+
+    def __init__(self, device: DeviceParams, params: DMX512Params, store: bool = True):
+        self.params = params
+        self.store = store
+        super().__init__(device)
+
+    def _build_command_body(self) -> bytes:
+        return bytes([
+            self.address,
+            self._code,
+            self._protocol,
+            StoreFlag.STORE if self.store else StoreFlag.NO_STORE,
+        ]) + self.params.bytes
+
+
+class GetPositionWindow(Command[float]):
+    """读取位置到达窗口.
+    
+    对应命令: 5.6.20 读取位置到达窗口（X42S/Y42）
+    发送: 01 41 6B
+    返回: 01 41 + 2字节数据 + 6B
+    """
+    _code = Code.GET_POSITION_WINDOW
+    _response_length = 5
+
+    def _build_command_body(self) -> bytes:
+        return bytes([self.address, self._code])
+
+    def _parse_response(self, data: bytes) -> float:
+        """返回位置到达窗口(度)."""
+        return to_int(data[0:2]) * 0.1
+
+
+class GetProtectionThreshold(Command[ProtectionThreshold]):
+    """读取过热过流保护检测阈值.
+    
+    对应命令: 5.6.22 读取过热过流保护检测阈值（X42S/Y42）
+    发送: 01 13 6B
+    """
+    _code = Code.GET_PROTECTION_THRESHOLD
+    _response_length = 9
+
+    def _build_command_body(self) -> bytes:
+        return bytes([self.address, self._code])
+
+    def _parse_response(self, data: bytes) -> ProtectionThreshold:
+        return ProtectionThreshold.from_bytes(data)
+
+
+class SetProtectionThreshold(SimpleCommand):
+    """修改过热过流保护检测阈值.
+    
+    对应命令: 5.6.23 修改过热过流保护检测阈值（X42S/Y42）
+    """
+    _code = Code.SET_PROTECTION_THRESHOLD
+    _protocol = Protocol.SET_PROTECTION_THRESHOLD
+
+    def __init__(
+        self,
+        device: DeviceParams,
+        params: ProtectionThreshold,
+        store: bool = True,
+    ):
+        self.params = params
+        self.store = store
+        super().__init__(device)
+
+    def _build_command_body(self) -> bytes:
+        return bytes([
+            self.address,
+            self._code,
+            self._protocol,
+            StoreFlag.STORE if self.store else StoreFlag.NO_STORE,
+        ]) + self.params.bytes
+
+
+class GetHeartbeatTime(Command[int]):
+    """读取心跳保护功能时间.
+    
+    对应命令: 5.6.24 读取心跳保护功能时间（X42S/Y42）
+    发送: 01 16 6B
+    """
+    _code = Code.GET_HEARTBEAT_TIME
+    _response_length = 7
+
+    def _build_command_body(self) -> bytes:
+        return bytes([self.address, self._code])
+
+    def _parse_response(self, data: bytes) -> int:
+        """返回心跳保护时间(ms)."""
+        return to_int(data[0:4])
+
+
+class GetIntegralStiffness(Command[int]):
+    """读取积分限幅/刚性系数.
+    
+    对应命令: 5.6.26 读取积分限幅/刚性系数（X42S/Y42）
+    Emm固件默认积分限幅 65535。
+    """
+    _code = Code.GET_INTEGRAL_STIFFNESS
+    _response_length = 7
+
+    def _build_command_body(self) -> bytes:
+        return bytes([self.address, self._code])
+
+    def _parse_response(self, data: bytes) -> int:
+        return to_int(data[0:4])
+
+
+class SetIntegralStiffness(SimpleCommand):
+    """修改积分限幅/刚性系数.
+    
+    对应命令: 5.6.27 修改积分限幅/刚性系数（X42S/Y42）
+    """
+    _code = Code.SET_INTEGRAL_STIFFNESS
+    _protocol = Protocol.SET_INTEGRAL_STIFFNESS
+
+    def __init__(self, device: DeviceParams, value: int = 65535, store: bool = True):
+        self.value = value & 0xFFFFFFFF
+        self.store = store
+        super().__init__(device)
+
+    def _build_command_body(self) -> bytes:
+        return bytes([
+            self.address,
+            self._code,
+            self._protocol,
+            StoreFlag.STORE if self.store else StoreFlag.NO_STORE,
+            (self.value >> 24) & 0xFF,
+            (self.value >> 16) & 0xFF,
+            (self.value >> 8) & 0xFF,
+            self.value & 0xFF,
+        ])
+
+
+class GetCollisionReturnAngle(Command[float]):
+    """读取碰撞回零返回角度.
+    
+    对应命令: 5.6.28 读取碰撞回零返回角度（X42S/Y42）
+    """
+    _code = Code.GET_COLLISION_RETURN_ANGLE
+    _response_length = 5
+
+    def _build_command_body(self) -> bytes:
+        return bytes([self.address, self._code])
+
+    def _parse_response(self, data: bytes) -> float:
+        """返回角度(度); 0 表示按电流检测返回."""
+        return to_int(data[0:2]) * 0.1
+
+
+class SetCollisionReturnAngle(SimpleCommand):
+    """修改碰撞回零返回角度.
+    
+    对应命令: 5.6.29 修改碰撞回零返回角度（X42S/Y42）
+    值为0表示基于电流检测返回；其余为固定角度(0.1°单位)。
+    """
+    _code = Code.SET_COLLISION_RETURN_ANGLE
+    _protocol = Protocol.SET_COLLISION_RETURN_ANGLE
+
+    def __init__(self, device: DeviceParams, angle_deg: float = 0.0, store: bool = True):
+        self.angle_raw = int(round(angle_deg * 10)) & 0xFFFF
+        self.store = store
+        super().__init__(device)
+
+    def _build_command_body(self) -> bytes:
+        return bytes([
+            self.address,
+            self._code,
+            self._protocol,
+            StoreFlag.STORE if self.store else StoreFlag.NO_STORE,
+            (self.angle_raw >> 8) & 0xFF,
+            self.angle_raw & 0xFF,
+        ])
+
+
+class SetLockParam(SimpleCommand):
+    """修改锁定修改参数功能.
+    
+    对应命令: 5.6.31 修改锁定修改参数功能（X42S/Y42）
+    """
+    _code = Code.SET_LOCK_PARAM
+    _protocol = Protocol.SET_LOCK_PARAM
+
+    def __init__(
+        self,
+        device: DeviceParams,
+        level: LockParamLevel = LockParamLevel.UNLOCKED,
+        store: bool = True,
+    ):
+        self.level = level
+        self.store = store
+        super().__init__(device)
+
+    def _build_command_body(self) -> bytes:
+        return bytes([
+            self.address,
+            self._code,
+            self._protocol,
+            StoreFlag.STORE if self.store else StoreFlag.NO_STORE,
+            int(self.level),
         ])
 
 

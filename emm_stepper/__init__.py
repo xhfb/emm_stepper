@@ -13,15 +13,24 @@ from .configs import (
     StoreFlag,
     MotionMode,
     HomingMode,
+    MotorType,
+    FirmwareType,
+    LockParamLevel,
+    Code,
 )
 from .parameters import (
     DeviceParams,
     JogParams,
     PositionParams,
     HomingParams,
+    ProtectionThreshold,
+    DMX512Params,
+    IOStatus,
+    OptionStatus,
+    HomeMotorStatus,
 )
 
-__version__ = "1.0.0"
+__version__ = "1.0.2"
 __all__ = [
     "EmmDevice",
     "Address",
@@ -31,8 +40,17 @@ __all__ = [
     "StoreFlag",
     "MotionMode",
     "HomingMode",
+    "MotorType",
+    "FirmwareType",
+    "LockParamLevel",
+    "Code",
     "DeviceParams",
     "JogParams",
     "PositionParams",
     "HomingParams",
+    "ProtectionThreshold",
+    "DMX512Params",
+    "IOStatus",
+    "OptionStatus",
+    "HomeMotorStatus",
 ]

@@ -240,7 +240,7 @@ motor.move_pulses(pulse_count=3200, speed=200, acceleration=20)
 motor.move_pulses(pulse_count=-1600, speed=200, acceleration=20)
 ```
 
-#### move_degrees(degrees, speed, acceleration, motion_mode, microstep, sync)
+#### move_degrees(degrees, speed, acceleration, motion_mode, microstep, motor_type, sync)
 位置模式运动（角度）。
 
 | 参数 | 类型 | 默认值 | 说明 |
@@ -250,6 +250,7 @@ motor.move_pulses(pulse_count=-1600, speed=200, acceleration=20)
 | acceleration | int | 10 | 加速度档位 (0-255) |
 | motion_mode | MotionMode | RELATIVE_LAST | 运动模式 |
 | microstep | int | 16 | 细分值 |
+| motor_type | MotorType | DEGREE_18 | 步距角类型（影响脉冲换算） |
 | sync | bool | False | 是否使用同步模式 |
 
 ```python
@@ -260,7 +261,7 @@ motor.move_degrees(degrees=90, speed=200, acceleration=20)
 motor.move_degrees(degrees=-180, speed=200, acceleration=20)
 ```
 
-#### move_revolutions(revolutions, speed, acceleration, motion_mode, microstep, sync)
+#### move_revolutions(revolutions, speed, acceleration, motion_mode, microstep, motor_type, sync)
 位置模式运动（圈数）。
 
 | 参数 | 类型 | 默认值 | 说明 |
@@ -270,6 +271,7 @@ motor.move_degrees(degrees=-180, speed=200, acceleration=20)
 | acceleration | int | 10 | 加速度档位 (0-255) |
 | motion_mode | MotionMode | RELATIVE_LAST | 运动模式 |
 | microstep | int | 16 | 细分值 |
+| motor_type | MotorType | DEGREE_18 | 步距角类型（影响脉冲换算） |
 | sync | bool | False | 是否使用同步模式 |
 
 ```python
@@ -518,6 +520,16 @@ position = motor.get_target_position()
 print(f"目标位置: {position:.2f}°")
 ```
 
+#### get_realtime_target()
+读取电机实时设定的目标位置。
+
+**返回值：** `float` - 实时设定目标位置角度 (度)
+
+```python
+position = motor.get_realtime_target()
+print(f"实时设定目标: {position:.2f}°")
+```
+
 #### get_realtime_speed()
 读取电机实时转速。
 
@@ -579,6 +591,20 @@ print(f"使能状态: {'已使能' if status.enabled else '未使能'}")
 print(f"位置到达: {'是' if status.position_reached else '否'}")
 print(f"堵转标志: {'是' if status.stall_detected else '否'}")
 print(f"堵转保护: {'已触发' if status.stall_protected else '未触发'}")
+```
+
+#### get_home_motor_status() / get_io_status() / timed_return()
+- `get_home_motor_status()`：回零状态 + 电机状态（`HomeMotorStatus`）
+- `get_io_status()`：En/Step/Dir 引脚电平（`IOStatus`）
+- `timed_return(info_code, interval_ms)`：定时返回；`interval_ms=0` 停止
+
+```python
+from emm_stepper import Code
+
+combo = motor.get_home_motor_status()
+io = motor.get_io_status()
+motor.timed_return(Code.GET_REALTIME_POSITION, interval_ms=10)
+motor.timed_return(Code.GET_REALTIME_POSITION, interval_ms=0)  # 停止
 ```
 
 #### get_pid()
@@ -725,32 +751,45 @@ motor.set_pid(params, store=True)
 motor.set_motor_direction(direction=Direction.CW, store=True)
 ```
 
-#### set_position_window(window_deg, store)
-修改位置到达窗口。
-
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| window_deg | float | 0.8 | 位置到达窗口 (度) |
-| store | bool | True | 是否存储 |
+#### set_position_window(window_deg, store) / get_position_window()
+修改/读取位置到达窗口（度）。
 
 ```python
 motor.set_position_window(window_deg=0.8, store=True)
+print(motor.get_position_window())
 ```
 
-#### set_heartbeat_time(time_ms, store)
-修改心跳保护功能时间。
-
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| time_ms | int | 0 | 心跳保护时间 (ms)，0表示关闭 |
-| store | bool | True | 是否存储 |
+#### set_heartbeat_time(time_ms, store) / get_heartbeat_time()
+修改/读取心跳保护时间（ms，0=关闭）。
 
 ```python
-# 设置1秒心跳保护
 motor.set_heartbeat_time(time_ms=1000, store=True)
+print(motor.get_heartbeat_time())
+```
 
-# 关闭心跳保护
-motor.set_heartbeat_time(time_ms=0, store=True)
+#### 其他驱动参数读写（V1.0.3 Emm）
+| 方法 | 说明 |
+|------|------|
+| `set_power_off_flag(flag)` | 修改掉电标志 |
+| `get_option_status()` | 选项参数状态（部分固件字段可能不可信） |
+| `set_motor_type(motor_type, store)` | 电机类型 `0x19`/`0x32` |
+| `set_firmware_type(firmware_type, store)` | 固件类型 X/Emm/狂暴 |
+| `get_dmx512_params()` / `set_dmx512_params(params, store)` | DMX512 参数 |
+| `get_protection_threshold()` / `set_protection_threshold(params, store)` | 过热过流阈值 |
+| `get_integral_stiffness()` / `set_integral_stiffness(value, store)` | 积分限幅 |
+| `get_collision_return_angle()` / `set_collision_return_angle(angle_deg, store)` | 碰撞回零返回角 |
+| `set_lock_param(level, store)` | 锁定修改参数等级 |
+| `multi_motor(ser, frames, expect_ack=...)` | 多电机命令（静态） |
+| `build_frame(body)` | 构建含子校验的帧（静态） |
+
+```python
+from emm_stepper import MotorType, LockParamLevel
+
+motor.set_motor_type(MotorType.DEGREE_18, store=True)
+motor.set_lock_param(LockParamLevel.UNLOCKED, store=True)
+
+frame = EmmDevice.build_frame(bytes([2, 0x36]))  # 地址2读实时位置
+EmmDevice.multi_motor(ser, [frame], expect_ack=False)
 ```
 
 #### set_auto_run(params)
@@ -916,12 +955,12 @@ else:
 | CRC8 | CRC8校验 |
 
 ### MotorType (枚举)
-电机类型。
+电机步距角类型（配置字节，Emm）。
 
-| 值 | 说明 |
-|-----|------|
-| OPEN_LOOP | 开环模式 |
-| CLOSED_LOOP | 闭环模式 |
+| 值 | 字节 | 说明 |
+|-----|------|------|
+| DEGREE_18 | 0x19 | 1.8° 步进电机（默认） |
+| DEGREE_09 | 0x32 | 0.9° 步进电机 |
 
 ### StallProtect (枚举)
 堵转保护模式。
