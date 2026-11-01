@@ -1,4 +1,14 @@
-# Emm Stepper - ZDT X42S 第二代闭环步进电机控制库
+# Emm Stepper - ZDT X42S 第二代闭环步进电机控制库（已停止维护）
+
+> [!WARNING]
+> **本项目不再维护。**
+>
+> 请改用功能更完整的后续项目 **[x42s_stepper](https://github.com/xhfb/x42s_stepper)**：支持不同固件（X、Emm、Emm 狂暴）和不同通讯协议（串口 TTL/RS485、SocketCAN）。
+>
+> - 仓库：<https://github.com/xhfb/x42s_stepper>
+> - PyPI：<https://pypi.org/project/x42s-stepper/>（`pip install x42s_stepper`；含 CAN：`pip install 'x42s_stepper[can]'`）
+>
+> 下文保留本库的原有文档，供查阅历史用法。迁移要点：`EmmDevice` → `X42SDevice`；`jog(speed=...)` → `jog(speed_rpm=...)`；位置运动改用 `move_position`。细节见新项目 README。
 
 基于 **ZDT_X42S 用户手册 V1.0.3 / V1.0.5**，仅支持 **Emm 固件**。实机验证含 `V1.0.7` 与 `V2.0.0`；V2.0.0+ 支持快速位置模式（F1/FC）。
 
@@ -33,7 +43,13 @@
 
 ## 安装
 
-本项目已发布到 PyPI，推荐直接使用 pip 安装，无需下载源码：
+本库已停止维护。新项目请安装 [x42s-stepper](https://pypi.org/project/x42s-stepper/)：
+
+```bash
+pip install x42s_stepper
+```
+
+若仍需使用本历史库，可从 PyPI 安装：
 
 ```bash
 pip install emm_stepper
